@@ -251,6 +251,10 @@ label{font-size:12px;font-weight:600;color:var(--text2);display:block;margin-bot
     <div class="ltitle">Đăng nhập</div>
     <div class="lsub">Nhập tài khoản để truy cập hệ thống</div>
     <div class="lerr" id="lerr"><i class="ti ti-alert-circle"></i><span id="lerr-msg"></span></div>
+    <div class="lfield" id="lshop-field" style="display:none">
+      <label>Mã cửa hàng</label>
+      <div class="liwrap"><i class="ti ti-building-store"></i><input id="lshop" type="text" placeholder="VD: demo" autocomplete="off"/></div>
+    </div>
     <div class="lfield"><label>Tên đăng nhập</label><div class="liwrap"><i class="ti ti-user"></i><input id="lu" type="text" placeholder="VD: admin" autocomplete="username"/></div></div>
     <div class="lfield"><label>Mật khẩu</label><div class="liwrap"><i class="ti ti-lock"></i><input id="lp" type="password" placeholder="nhập mật khẩu..." autocomplete="current-password"/></div></div>
     <button class="lbtn" id="lbtn"><i class="ti ti-login"></i>Đăng nhập</button>
@@ -549,10 +553,14 @@ label{font-size:12px;font-weight:600;color:var(--text2);display:block;margin-bot
             <div class="metric"><div class="metric-icon" style="background:var(--amber-l)"><i class="ti ti-report-money" style="color:var(--amber)"></i></div><div class="metric-label">Chi phí vận hành</div><div class="metric-val">0đ</div><div class="metric-sub">—</div></div>
             <div class="metric"><div class="metric-icon" style="background:var(--green-l)"><i class="ti ti-pig-money" style="color:var(--green)"></i></div><div class="metric-label">Lợi nhuận ròng</div><div class="metric-val">0đ</div><div class="metric-sub">—</div></div>
           </div>
-          <div class="card" style="padding:40px;text-align:center">
+          <div class="card" id="profit-empty-card" style="padding:40px;text-align:center">
             <i class="ti ti-chart-pie" style="font-size:40px;color:var(--text3)"></i>
             <div style="margin-top:12px;font-size:14px;color:var(--text2);font-weight:500">Chưa có dữ liệu lợi nhuận</div>
             <div style="margin-top:6px;font-size:12px;color:var(--text3)">Nhập giá vốn cho sản phẩm và bắt đầu bán hàng để xem phân tích lợi nhuận</div>
+          </div>
+          <div class="card" id="profit-table-card" style="padding:0;overflow:hidden;display:none">
+            <table><thead><tr><th>Danh mục</th><th>Doanh thu</th><th>Giá vốn</th><th>Lợi nhuận</th><th>Biên LN</th></tr></thead>
+            <tbody id="rpt-profit-tbody"></tbody></table>
           </div>
         </div>
 
@@ -1335,13 +1343,28 @@ function showErr(msg){
   document.getElementById('lerr').classList.add('show');
 }
 
-function doLogin(){
+async function doLogin(){
   const u = document.getElementById('lu').value.trim().toLowerCase();
   const p = document.getElementById('lp').value;
   document.getElementById('lerr').classList.remove('show');
 
   if(!u || !p){ showErr('Vui lòng nhập đầy đủ tên đăng nhập và mật khẩu.'); return; }
 
+  // ── Mode ONLINE: đăng nhập qua API backend (multi-tenant) ──
+  if(typeof _useApi !== 'undefined' && _useApi){
+    const shopSlug = (document.getElementById('lshop')||{value:'demo'}).value.trim().toLowerCase() || 'demo';
+    const btn = document.getElementById('lbtn');
+    if(btn){ btn.disabled = true; btn.innerHTML = '<i class="ti ti-loader-2"></i> Đang đăng nhập...'; }
+    const ok = await apiLogin(shopSlug, u, p);
+    if(btn){ btn.disabled = false; btn.innerHTML = '<i class="ti ti-login"></i>Đăng nhập'; }
+    if(!ok){
+      showErr('Sai mã cửa hàng, tên đăng nhập hoặc mật khẩu.');
+      document.getElementById('lp').value = '';
+    }
+    return;
+  }
+
+  // ── Mode OFFLINE: đăng nhập bằng tài khoản cố định trong code ──
   const acc = ACCOUNTS.find(a => a.u === u);
   if(!acc || PASS[u] !== p){
     showErr('Sai tên đăng nhập hoặc mật khẩu. Vui lòng thử lại.');
@@ -1953,6 +1976,55 @@ function refreshReports() {
   updRptMetric('rpt-revenue', 0, totalRev    ? fmtM(totalRev) : '0đ',  totalRev    ? 'Tháng này' : 'Chưa có');
   updRptMetric('rpt-revenue', 1, totalOrds   || 0,                       totalOrds   ? `TB ${avgOrd ? fmtM(avgOrd)+'/đơn':'—'}` : '—');
   updRptMetric('rpt-revenue', 2, avgOrd      ? fmtM(avgOrd) : '0đ',    avgOrd      ? 'Giá trị TB/đơn' : '—');
+
+  // ── Update rpt-profit: tính giá vốn từ wholesale price của từng sản phẩm ──
+  // Lưu ý: dùng doanh thu THUẦN (chưa gồm VAT) để tính lợi nhuận, vì VAT là thuế phải nộp, không phải lợi nhuận
+  const totalRevNet = ORDERS.reduce((s,o) => s + (o.sub - (o.disc||0)), 0);
+  let totalCost = 0;
+  const profitByCat = {}; // {cat: {rev, cost}}
+  ORDERS.forEach(o => o.items.forEach(([name, price, qty]) => {
+    const prod = PRODUCTS.find(p => p.name === name);
+    const unitCost = prod ? (prod.wholesale || prod.retail * 0.7 || 0) : 0; // ước tính 70% nếu thiếu giá vốn
+    const lineRev  = price * qty;
+    const lineCost = unitCost * qty;
+    totalCost += lineCost;
+    const cat = prod ? (prod.cat || 'Khác') : 'Khác';
+    if (!profitByCat[cat]) profitByCat[cat] = { rev: 0, cost: 0 };
+    profitByCat[cat].rev  += lineRev;
+    profitByCat[cat].cost += lineCost;
+  }));
+  const grossProfit  = totalRevNet - totalCost;
+  const opCost        = STAFF.reduce((s,x) => s + (x.salary||0), 0); // chi phí vận hành = tổng lương NV
+  const netProfit      = grossProfit - opCost;
+
+  updRptMetric('rpt-profit', 0, fmtM(grossProfit), totalRevNet ? `Biên ${Math.round(grossProfit/totalRevNet*100)}%` : '—');
+  updRptMetric('rpt-profit', 1, fmtM(totalCost),   totalRevNet ? 'Giá vốn hàng bán' : '—');
+  updRptMetric('rpt-profit', 2, fmtM(opCost),      opCost ? 'Lương nhân viên' : 'Chưa có');
+  updRptMetric('rpt-profit', 3, fmtM(netProfit),   totalRevNet ? (netProfit>=0?'Có lãi':'Đang lỗ') : '—');
+
+  // Bảng lợi nhuận theo danh mục
+  const profitEmptyCard = document.getElementById('profit-empty-card');
+  const profitTableCard = document.getElementById('profit-table-card');
+  const profitTbody     = document.getElementById('rpt-profit-tbody');
+  const catEntries = Object.entries(profitByCat);
+  if (catEntries.length && profitTbody) {
+    if (profitEmptyCard) profitEmptyCard.style.display = 'none';
+    if (profitTableCard) profitTableCard.style.display = 'block';
+    profitTbody.innerHTML = catEntries.map(([cat, d]) => {
+      const profit = d.rev - d.cost;
+      const margin = d.rev ? Math.round(profit/d.rev*100) : 0;
+      return `<tr>
+        <td style="font-weight:600">${cat}</td>
+        <td style="font-weight:600;color:var(--green)">${fmtM(d.rev)}</td>
+        <td>${fmtM(d.cost)}</td>
+        <td style="font-weight:700;color:${profit>=0?'var(--green)':'var(--red)'}">${fmtM(profit)}</td>
+        <td><span class="badge ${margin>=30?'bg':margin>=10?'ba':'br'}">${margin}%</span></td>
+      </tr>`;
+    }).join('');
+  } else {
+    if (profitEmptyCard) profitEmptyCard.style.display = 'block';
+    if (profitTableCard) profitTableCard.style.display = 'none';
+  }
 
   // Update rpt-products metrics
   updRptMetric('rpt-products', 0, PRODUCTS.length || 0, PRODUCTS.length ? 'Tổng SKU' : '—');
@@ -2575,6 +2647,307 @@ function saveShop(){
 
 
 
+
+
+// ════════════════════════════════════════════════════════════
+// API CLIENT — Kết nối SaaS Backend (multi-tenant)
+// Tự động detect: có server → dùng API, không → offline localStorage
+// ════════════════════════════════════════════════════════════
+const API_BASE = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+  ? 'http://localhost:8000/api' : '/api';
+
+let _apiToken = localStorage.getItem('sp_token') || null;
+let _apiShop  = localStorage.getItem('sp_shop')  || null;
+let _useApi   = false;
+
+async function api(method, path, body=null){
+  const h={'Content-Type':'application/json'};
+  if(_apiToken) h['Authorization']='Bearer '+_apiToken;
+  try{
+    const r=await fetch(API_BASE+path,{method,headers:h,body:body?JSON.stringify(body):null});
+    if(r.status===401){
+      _apiToken=null; localStorage.removeItem('sp_token');
+      toast('Phiên đăng nhập hết hạn, vui lòng đăng nhập lại','error');
+      setTimeout(()=>location.reload(), 1200);
+      return null;
+    }
+    const d=await r.json();
+    if(!r.ok) throw new Error(d.detail||'Lỗi server');
+    return d;
+  }catch(e){
+    if(e.message&&(e.message.includes('fetch')||e.message.includes('Failed')||e.message.includes('NetworkError')))return null;
+    toast('Lỗi: '+e.message,'error'); return null;
+  }
+}
+
+// ── Kiểm tra backend có chạy không ─────────────────────────
+async function checkBackend(){
+  try{
+    const r=await fetch(API_BASE.replace('/api','')+'/health',{signal:AbortSignal.timeout(2500)});
+    _useApi = r.ok;
+  }catch{ _useApi = false; }
+
+  // Hiện/ẩn ô "Mã cửa hàng" tùy theo mode
+  const shopField = document.getElementById('lshop-field');
+  if(shopField) shopField.style.display = _useApi ? 'block' : 'none';
+
+  const ind = document.getElementById('save-indicator');
+  if(ind){ ind.textContent = _useApi ? '🌐 Online' : '💾 Offline'; ind.style.opacity='1'; }
+
+  return _useApi;
+}
+
+// ── Đăng nhập qua API thật ──────────────────────────────────
+async function apiLogin(shopSlug, username, password){
+  const res = await api('POST','/auth/login', {
+    shop_slug: shopSlug, username, password
+  });
+  if(!res) return false;
+  _apiToken = res.token;
+  _apiShop  = res.shop.slug;
+  localStorage.setItem('sp_token', _apiToken);
+  localStorage.setItem('sp_shop', _apiShop);
+
+  // Gán currentUser theo định dạng app đang dùng
+  currentUser = {
+    u: res.user.username, p: '', name: res.user.name,
+    role: res.user.role, init: res.user.name.split(' ').map(w=>w[0]).slice(-2).join('').toUpperCase(),
+    bg: '#E1F5EE', tc: '#0F6E56', icon: 'ti-user', badge: 'bg',
+    screens: res.user.screens
+  };
+
+  // Áp dụng VAT rate từ shop
+  const vatEl = document.getElementById('sh-vat');
+  if(vatEl && res.shop.vat_rate) vatEl.value = res.shop.vat_rate;
+
+  const nameEl = document.getElementById('sh-name');
+  if(nameEl) nameEl.value = res.shop.name || '';
+  const sbShop = document.getElementById('sb-shop-name');
+  if(sbShop) sbShop.textContent = res.shop.name || 'Cửa hàng của tôi';
+
+  applyPermissions(currentUser);
+
+  const ls = document.getElementById('login-screen');
+  ls.style.opacity = '0';
+  setTimeout(()=>{ ls.style.display='none'; }, 350);
+  document.getElementById('app').style.display = 'flex';
+
+  toast(`Chào mừng, ${res.user.name}! (${res.user.role})`, 'success');
+
+  await syncFromApi();
+  return true;
+}
+
+// ── Đồng bộ toàn bộ dữ liệu từ server về client ─────────────
+async function syncFromApi(){
+  if(!_useApi || !_apiToken) return;
+  const [prods, custs, invs, staffs, ords] = await Promise.all([
+    api('GET','/products'), api('GET','/customers'),
+    api('GET','/inventory'), api('GET','/staff'), api('GET','/orders?limit=200')
+  ]);
+
+  if(prods){ PRODUCTS.length=0; PRODUCTS.push(...prods.map(p=>({
+    id:p.id, name:p.name, emoji:p.emoji||'📦', cat:p.category||'',
+    retail:p.retail_price, wholesale:p.wholesale_price, stock:p.stock, unit:p.unit
+  }))); }
+
+  if(custs){ CUSTS.length=0; CUSTS.push(...custs.map(c=>({
+    id:c.id, name:c.name, phone:c.phone||'', email:c.email||'',
+    type:c.type, points:c.points||0, spend:c.total_spend||0, debt:c.debt||0
+  }))); }
+
+  if(staffs){ STAFF.length=0; STAFF.push(...staffs.map(s=>({
+    id:s.id, name:s.full_name||s.username, role:s.role, phone:s.phone||'',
+    email:s.email||'', salary:s.salary||0, join:s.join_date||'',
+    orders:0, revenue:0, shifts:0
+  }))); }
+
+  if(ords){ ORDERS.length=0; ORDERS.push(...ords.map(o=>({
+    no:o.order_no, custName:o.customer_name, total:o.total,
+    sub:o.subtotal, vat:o.vat, payMethod:o.pay_method,
+    date:(o.created_at||'').slice(0,10), time:(o.created_at||'').slice(11,16)
+  }))); }
+
+  if(invs){ INV_DATA.length=0; INV_DATA.push(...invs.map(i=>({
+    _id:i.id, code:i.code, type:i.type,
+    label:{NK:'Nhập kho',XK:'Xuất bán',DT:'Đổi trả',KK:'Kiểm kê'}[i.type]||i.type,
+    prod:i.product_name, qty:(i.type==='XK'?'-':'+')+i.quantity,
+    rawQty:i.quantity, price:i.unit_price,
+    total:i.total_value ? i.total_value.toLocaleString('vi-VN')+'đ' : '—',
+    sup:i.supplier_name||'—', date:(i.created_at||'').slice(0,10),
+    user:i.created_by_name||'—', sl:i.status,
+    sc: i.status==='Đã duyệt' ? 'bg' : i.status==='Chờ duyệt' ? 'ba' : 'br'
+  }))); }
+
+  console.log('✅ Đã đồng bộ:', {sp:PRODUCTS.length, kh:CUSTS.length, nv:STAFF.length, dh:ORDERS.length, kho:INV_DATA.length});
+
+  if(typeof renderProds==='function')   renderProds(PRODUCTS);
+  if(typeof renderPOS==='function')     renderPOS();
+  if(typeof renderCust==='function')    renderCust(CUSTS);
+  if(typeof renderCartCust==='function') renderCartCust();
+  if(typeof renderInv==='function')     renderInv(INV_DATA);
+  if(typeof renderStaff==='function')   renderStaff();
+  if(typeof refreshDashboard==='function') refreshDashboard();
+}
+
+// ── Đăng xuất ────────────────────────────────────────────────
+async function apiLogout(){
+  if(_useApi && _apiToken) await api('POST','/auth/logout');
+  _apiToken = null; localStorage.removeItem('sp_token');
+  localStorage.removeItem('sp_shop');
+  location.reload();
+}
+
+// ── Override checkout — gọi API khi online ──────────────────
+const _localCheckout = window.checkout || function(){};
+window.checkout = async function(){
+  if(!_useApi){ _localCheckout(); return; }
+  if(!Object.keys(cart).length){ toast('Đơn hàng trống','error'); return; }
+
+  const custVal  = document.getElementById('cart-cust').value;
+  const custId   = custVal==='0' ? null : (CUSTS[+custVal-1]?.id || null);
+  const custName = custVal==='0' ? 'Vãng lai' : (CUSTS[+custVal-1]?.name || 'Vãng lai');
+  const payEl    = document.querySelector('.pay-opt-new.active,.pay-opt.active');
+  const payMethod= payEl ? payEl.textContent.trim().replace(/[\n]/g,'').trim() : 'Tiền mặt';
+  const items    = Object.values(cart).map(i=>({
+    product_id: i.pid||null, product_name: i.name,
+    unit_price: i.price, quantity: i.qty
+  }));
+
+  const res = await api('POST','/orders', {
+    customer_id: custId, customer_name: custName, items, pay_method: payMethod
+  });
+  if(!res){ toast('Lỗi tạo đơn hàng','error'); return; }
+
+  toast(`✅ ${res.order_no} — ${custName} — ${fmtM(res.total)}`, 'success');
+  ORDERS.push({
+    no:res.order_no, custName, total:res.total, sub:res.total-res.vat,
+    vat:res.vat, payMethod, date:todayStr(), time:new Date().toTimeString().slice(0,5)
+  });
+  Object.values(cart).forEach(i=>{
+    const p = PRODUCTS.find(x=>x.name===i.name);
+    if(p) p.stock = Math.max(0, p.stock - i.qty);
+  });
+  cart = {}; orderNo++;
+  document.getElementById('cart-no').textContent = 'Đơn hàng #DH'+String(orderNo).padStart(3,'0');
+  renderCart(); renderPOS(); refreshDashboard();
+  if(typeof refreshReports==='function') refreshReports();
+
+  setTimeout(()=>{
+    if(printerCfg.method==='pdf' || (printerCfg.method==='browser'&&printerCfg.brAuto)){
+      printReceipt(res.order_no, custName, items.map(i=>[i.product_name,i.unit_price,i.quantity]),
+        res.total-res.vat, res.discount||0, res.vat, res.total, payMethod);
+    } else if(confirm('In hóa đơn '+res.order_no+'?')){
+      printReceipt(res.order_no, custName, items.map(i=>[i.product_name,i.unit_price,i.quantity]),
+        res.total-res.vat, res.discount||0, res.vat, res.total, payMethod);
+    }
+  }, 300);
+};
+
+// ── Override addProd — gọi API khi online ────────────────────
+const _localAddProd = window.addProd || function(){};
+window.addProd = async function(){
+  if(!_useApi){ _localAddProd(); return; }
+  const name = (document.getElementById('np-name')||{value:''}).value.trim();
+  const cat  = (document.getElementById('np-cat') ||{value:''}).value.trim();
+  const unit = (document.getElementById('np-unit')||{value:'Cái'}).value || 'Cái';
+  if(!name){ toast('Nhập tên sản phẩm','error'); return; }
+  if(!cat){ toast('Nhập danh mục','error'); return; }
+
+  const res = await api('POST','/products', {
+    name, emoji:'📦', category:cat, unit,
+    retail_price: +document.getElementById('np-retail').value || null,
+    wholesale_price: +document.getElementById('np-wholesale').value || null,
+    stock: +document.getElementById('np-stock').value || 0,
+  });
+  if(!res){ toast('Lỗi thêm sản phẩm','error'); return; }
+
+  PRODUCTS.push({id:res.id, name:res.name, emoji:res.emoji||'📦', cat:res.category||'',
+    retail:res.retail_price, wholesale:res.wholesale_price, stock:res.stock||0, unit:res.unit||'Cái'});
+  if(!PROD_CATS.includes(cat)) PROD_CATS.push(cat);
+  renderProds(PRODUCTS); renderPOS(); closeModal('madd-prod');
+  toast('✅ Đã thêm: '+name, 'success');
+  ['np-name','np-cat','np-retail','np-wholesale','np-stock'].forEach(id=>{
+    const e=document.getElementById(id); if(e) e.value='';
+  });
+};
+
+// ── Override addCust — gọi API khi online ────────────────────
+const _localAddCust = window.addCust || function(){};
+window.addCust = async function(){
+  if(!_useApi){ _localAddCust(); return; }
+  const name  = (document.getElementById('nc-name') ||{value:''}).value.trim();
+  const phone = (document.getElementById('nc-phone')||{value:''}).value.trim();
+  if(!name||!phone){ toast('Nhập tên và số điện thoại','error'); return; }
+
+  const res = await api('POST','/customers', {
+    name, phone,
+    email:(document.getElementById('nc-email')||{value:''}).value,
+    note:(document.getElementById('nc-note')||{value:''}).value
+  });
+  if(!res){ toast('Lỗi thêm khách hàng','error'); return; }
+
+  CUSTS.push({id:res.id, name:res.name, phone:res.phone, email:res.email||'',
+    type:res.type, points:0, spend:0, debt:0});
+  renderCust(CUSTS); renderCartCust(); closeModal('madd-cust');
+  toast('✅ Đã thêm: '+name, 'success');
+};
+
+// ── Override addStaff — gọi API khi online (tạo TÀI KHOẢN thật) ──
+const _localAddStaff = window.addStaff || function(){};
+window.addStaff = async function(){
+  if(!_useApi){ _localAddStaff(); return; }
+  const name  = (document.getElementById('ns-name') ||{value:''}).value.trim();
+  const phone = (document.getElementById('ns-phone')||{value:''}).value.trim();
+  const role  = (document.getElementById('ns-role') ||{value:'Thu ngân'}).value;
+  const email = (document.getElementById('ns-email')||{value:''}).value.trim();
+  const sal   = +(document.getElementById('ns-salary')||{value:0}).value || 0;
+  const join  = (document.getElementById('ns-join') ||{value:''}).value || todayStr();
+  if(!name||!phone){ toast('Nhập tên và số điện thoại','error'); return; }
+
+  // Sinh username tự động từ tên (bỏ dấu, viết liền)
+  const username = name.toLowerCase()
+    .replace(/[àáạảãâầấậẩẫăằắặẳẵ]/g,'a').replace(/[èéẹẻẽêềếệểễ]/g,'e')
+    .replace(/[ìíịỉĩ]/g,'i').replace(/[òóọỏõôồốộổỗơờớợởỡ]/g,'o')
+    .replace(/[ùúụủũưừứựửữ]/g,'u').replace(/[ỳýỵỷỹ]/g,'y').replace(/đ/g,'d')
+    .replace(/[^a-z0-9]/g,'').slice(0,20) + Math.floor(Math.random()*100);
+  const tempPass = '123456';
+
+  const res = await api('POST','/staff', {
+    username, password: tempPass, full_name: name, role, phone, email,
+    salary: sal, join_date: join
+  });
+  if(!res){ toast('Lỗi thêm nhân viên','error'); return; }
+
+  closeModal('madd-staff');
+  await syncFromApi();
+  toast(`✅ Đã tạo tài khoản: ${username} / ${tempPass} — gửi cho nhân viên để đăng nhập`, 'success');
+  ['ns-name','ns-phone','ns-email','ns-salary','ns-join'].forEach(id=>{
+    const e=document.getElementById(id); if(e) e.value='';
+  });
+};
+
+// ── Khởi động: kiểm tra backend ngay khi load trang ──────────
+(async()=>{
+  await checkBackend();
+  // Nếu đã có token cũ và backend online → thử khôi phục session
+  if(_useApi && _apiToken){
+    const me = await api('GET','/auth/me');
+    if(me){
+      currentUser = {
+        u: me.user.username, p:'', name: me.user.name, role: me.user.role,
+        init: me.user.name.split(' ').map(w=>w[0]).slice(-2).join('').toUpperCase(),
+        bg:'#E1F5EE', tc:'#0F6E56', icon:'ti-user', badge:'bg', screens: me.user.screens
+      };
+      applyPermissions(currentUser);
+      document.getElementById('login-screen').style.display = 'none';
+      document.getElementById('app').style.display = 'flex';
+      await syncFromApi();
+    } else {
+      _apiToken = null; localStorage.removeItem('sp_token');
+    }
+  }
+})();
 
 // ════════════════════════════════════════════════════════════
 // LOCALSTORAGE — Tự động lưu & phục hồi dữ liệu
