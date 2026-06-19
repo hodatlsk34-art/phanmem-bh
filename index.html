@@ -1408,7 +1408,10 @@ function applyPermissions(acc){
   // Navigate to first allowed screen
   // Phục hồi dữ liệu từ localStorage
   const loaded = lsLoad();
-  if(loaded) { renderProds(PRODUCTS); renderPOS(); renderCart(); renderCartCust(); }
+  if(loaded) {
+    renderProds(PRODUCTS); renderPOS(); renderCart(); renderCartCust();
+    renderInv(INV_DATA); renderStaff(); renderCust(CUSTS);
+  }
   goTo(acc.screens[0]);
 }
 
@@ -2587,10 +2590,11 @@ function renderRoles(){
 // ============================================================
 function goTo(s){
   _origGoTo(s);
-  if(s==='staff')    renderStaff();
-  if(s==='roles')    renderRoles();
-  if(s==='reports')  refreshReports();
-  if(s==='dashboard') refreshDashboard();
+  if(s==='staff')      renderStaff();
+  if(s==='inventory')  renderInv(INV_DATA);
+  if(s==='roles')      renderRoles();
+  if(s==='reports')    refreshReports();
+  if(s==='dashboard')  refreshDashboard();
   if(s==='settings') { const i=lsInfo(); const ib=document.getElementById('ls-size'); if(ib) ib.textContent=i.kb+'KB ('+i.pct+'%)'; const ib2=document.getElementById('ls-detail'); if(ib2) ib2.textContent=i.products+' SP, '+i.orders+' đơn, '+STAFF.length+' NV, '+CUSTS.length+' KH'; const bar=document.getElementById('ls-bar'); if(bar) bar.style.width=Math.min(100,+i.pct)+'%'; }
 }
 
