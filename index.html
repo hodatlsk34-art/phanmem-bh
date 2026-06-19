@@ -2045,8 +2045,30 @@ function refreshReports() {
     return s + price * (p.stock||0);
   }, 0);
   const lowStock = PRODUCTS.filter(p=>p.retail && p.stock<=10).length;
+
+  // Nhập kho tháng này: tổng giá trị các phiếu NK đã duyệt (hoặc hoàn thành) trong tháng hiện tại
+  const curMonth = todayStr().split('/').slice(1).join('/'); // "MM/YYYY"
+  const nkThisMonth = INV_DATA.filter(r =>
+    r.type === 'NK' && (r.sl === 'Đã duyệt' || r.sl === 'Hoàn thành') &&
+    (r.date||'').split('/').slice(1).join('/') === curMonth
+  );
+  const xkThisMonth = INV_DATA.filter(r =>
+    r.type === 'XK' && (r.date||'').split('/').slice(1).join('/') === curMonth
+  );
+  const nkVal = nkThisMonth.reduce((s,r) => s + (r.price||0) * (r.rawQty||0), 0);
+  const xkVal = xkThisMonth.reduce((s,r) => s + (r.price||0) * (r.rawQty||0), 0);
+
   updRptMetric('rpt-inventory', 0, fmtM(totalStockVal), PRODUCTS.length ? `${PRODUCTS.length} SKU` : '—');
+  updRptMetric('rpt-inventory', 1, fmtM(nkVal), nkThisMonth.length ? `${nkThisMonth.length} phiếu` : 'Chưa có');
+  updRptMetric('rpt-inventory', 2, fmtM(xkVal), xkThisMonth.length ? `${xkThisMonth.length} phiếu` : 'Chưa có');
   updRptMetric('rpt-inventory', 3, lowStock||0,          lowStock ? `${lowStock} SP cần nhập` : 'Không có');
+
+  // Hiện/ẩn card "Chưa có dữ liệu tồn kho" khi đã có hoạt động kho
+  const invEmptyCard = document.querySelector('#rpt-inventory .card');
+  if (invEmptyCard) {
+    const hasActivity = INV_DATA.length > 0 || PRODUCTS.length > 0;
+    invEmptyCard.style.display = hasActivity ? 'none' : 'block';
+  }
 
   // Cập nhật bảng sản phẩm trong rpt-products nếu có đơn hàng
   const rptProdBody = document.getElementById('rpt-prod-tbody');
